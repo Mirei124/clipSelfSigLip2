@@ -3,3 +3,4 @@ from .evaclip_vit import EvaCLIPViT   # noqa
 from .fvit_head import FViTRoIHead, FViTBBoxHead, FViTTransferBBoxHead   # noqa
 from .fvit import FViT # noqa
 from .custom_rpn_head import CustomRPNHead  # noqa
+from .siglip2 import Siglip2ViT
