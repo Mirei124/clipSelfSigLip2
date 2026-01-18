@@ -117,3 +117,43 @@ def build_text_embedding_openclip(categories, model, tokenizer):
 
     all_text_embeddings = all_text_embeddings.t()
     return all_text_embeddings
+
+
+def build_text_embedding_transformers(categories, model, tokenizer):
+    templates = multiple_templates
+
+    run_on_gpu = torch.cuda.is_available()
+
+    with torch.no_grad():
+        all_text_embeddings = []
+        for category in tqdm(categories):
+            texts = [
+                template.format(
+                    processed_name(category, rm_dot=True), article=article(category)
+                )
+                for template in templates
+            ]
+            texts = [
+                "This is " + text if text.startswith("a") or text.startswith("the") else text
+                for text in texts
+            ]
+            texts = tokenizer(texts,
+                              return_tensors='pt',
+                              max_length=64,  # siglip's max_pos_emb length
+                              padding='max_length',
+                              truncation=True,
+                              ).input_ids
+            if run_on_gpu:
+                texts = texts.cuda()
+                model = model.cuda()
+            text_embeddings = model.get_text_features(texts)
+            text_embeddings /= text_embeddings.norm(dim=-1, keepdim=True)
+            text_embedding = text_embeddings.mean(dim=0)
+            text_embedding /= text_embedding.norm()
+            all_text_embeddings.append(text_embedding)
+        all_text_embeddings = torch.stack(all_text_embeddings, dim=1)
+        if run_on_gpu:
+            all_text_embeddings = all_text_embeddings.cuda()
+
+    all_text_embeddings = all_text_embeddings.t()
+    return all_text_embeddings

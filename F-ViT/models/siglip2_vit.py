@@ -1,23 +1,14 @@
 import copy
 import math
-import os
 import warnings
 from dataclasses import dataclass
-from functools import partial
 from typing import Any, Callable, Optional, Union
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from mmcv.cnn import build_norm_layer
-from mmcv.runner import BaseModule
-from mmcv.utils.logging import print_log
-from mmdet.models.builder import BACKBONES
-from torch import nn
-from torch.nn import functional as F
 from torch.nn.init import _calculate_fan_in_and_fan_out
-from transformers import SiglipVisionModel
 from transformers.activations import ACT2FN
 
 # Optional imports for compatibility with different transformers versions
@@ -94,8 +85,8 @@ class Siglip2MLP(nn.Module):
         hidden_states = self.fc2(hidden_states)
         return hidden_states
 
-
-def Siglip2_ViT_Wrapper(model: SiglipVisionModel, use_reg=False, maskclip=False):
+from transformers import SiglipModel
+def Siglip2_ViT_Wrapper(model: SiglipModel, use_reg=False, maskclip=False):
     @torch.no_grad()
     def init_reg_token(self):
         # use gaussian image patches to initialize the register tokens
@@ -237,119 +228,6 @@ def Siglip2_ViT_Wrapper(model: SiglipVisionModel, use_reg=False, maskclip=False)
     else:
         vit.num_register_tokens = 0
     return vit
-
-@BACKBONES.register_module()
-class Siglip2ViT(BaseModule):
-    def __init__(self, model_name, pretrained, out_indices=[3, 5, 7, 11], norm_cfg=None):
-        super().__init__()
-        self.vit_layers = out_indices
-        self.model_name = model_name
-        self.pretrained = pretrained  # the pretrained .pt file
-        
-        # import pdb; pdb.set_trace()
-        clip_model = SiglipVisionModel.from_pretrained(pretrained)
-
-        self.embed_dim = embed_dim = clip_model.vision_model.head.mlp.fc2.weight.shape[0]  # output dim
-        self.width = width = clip_model.vision_model.embeddings.patch_embedding.weight.shape[0]
-        self.patch_size = patch_size = clip_model.vision_model.embeddings.patch_embedding.weight.shape[-1]
-        self.interpolate1 = nn.Sequential(
-            nn.ConvTranspose2d(width, width, kernel_size=2, stride=2),
-            build_norm_layer(norm_cfg, width)[1] if norm_cfg else nn.Identity(),
-            nn.GELU(),
-            nn.ConvTranspose2d(width, width, kernel_size=2, stride=2),
-        )
-        self.interpolate2 = nn.Sequential(
-            nn.ConvTranspose2d(width, width, kernel_size=2, stride=2),
-        )
-        self.interpolate3 = nn.Identity()
-        self.interpolate4 = nn.MaxPool2d(kernel_size=2, stride=2)
-        self.visual = clip_model.vision_model
-
-    def init_weights(self):
-        clip_model = SiglipVisionModel.from_pretrained(self.pretrained)
-        print_log(self.visual.load_state_dict(clip_model.vision_model.state_dict(), strict=True))
-        for param in self.visual.parameters():  # only freeze the CLIP model
-            param.requires_grad = False
-
-    def train(self, mode=True):
-        print(f"Set train mode for SigLIP2: {mode}", flush=True)
-        self.training = mode
-        self.visual.train(False)
-        self.interpolate1.train(mode)
-        self.interpolate2.train(mode)
-        self.interpolate3.train(mode)
-        self.interpolate4.train(mode)
-
-        return self
-
-    def forward(self, x):
-        visual = self.visual
-        bs, _, h, w = x.shape
-        h = h // visual.embeddings.patch_embedding.weight.shape[-2]
-        w = w // visual.embeddings.patch_embedding.weight.shape[-1]
-
-        with torch.no_grad():
-            hidden_states = visual.embeddings(x, interpolate_pos_encoding=True)
-        
-            # if self.num_register_tokens > 0:
-            #     hidden_states = torch.cat([hidden_states, self.reg_token.expand(hidden_states.size(0), -1, -1)], dim=1)
-
-            outs = []
-            for i, blk in enumerate(visual.encoder.layers[:-1]):
-                hidden_states = blk(hidden_states=hidden_states, attention_mask=None)[0]
-                if i in self.vit_layers:
-                    outs.append(self._expand_x(hidden_states, h, w))
-            
-            last_hidden_state = visual.encoder.layers[-1](hidden_states=hidden_states, attention_mask=None)[0]
-            if (len(visual.encoder.layers) - 1) in self.vit_layers:
-                outs.append(self._expand_x(last_hidden_state, h, w))
-
-            # if self.num_register_tokens > 0:
-            #     # apply projection only on non-register tokens
-            #     last_hidden_state = last_hidden_state[:,:-self.num_register_tokens]
-            
-            last_hidden_state = visual.post_layernorm(last_hidden_state)
-            
-            #hidden_state = self.attention(probe, hidden_state, hidden_state)[0] this is in siglip's vanilla code
-            # this is customized attentionpooling
-            attn_weight = visual.head.attention.in_proj_weight
-            attn_bias = visual.head.attention.in_proj_bias
-            last_hidden_state_qkv = F.linear(last_hidden_state, attn_weight, attn_bias)
-            query, key, value = last_hidden_state_qkv.chunk(3, dim=-1)
-            num_heads = visual.head.attention.num_heads
-            head_dim = query.size(-1) // num_heads
-            batch_sz = query.size(0)
-                
-            last_hidden_state = visual.head.attention.out_proj(value)
-
-            residual = last_hidden_state
-            last_hidden_state = visual.head.layernorm(last_hidden_state)
-            last_hidden_state = residual + visual.head.mlp(last_hidden_state)
-            
-            if not self.training:
-                last_hidden_state = F.normalize(last_hidden_state, dim=-1)
-                feature_map = last_hidden_state.view(bs, h, w, -1).permute(0, 3, 1, 2)
-            else:
-                feature_map = None
-            
-        assert len(outs) == 4
-        for idx, out in enumerate(outs):
-            interpolate = getattr(self, f"interpolate{idx + 1}")
-            outs[idx] = interpolate(out.detach())
-
-        outs.append(feature_map)
-
-        # import pdb; pdb.set_trace()
-        return tuple(outs)
-
-    
-    def _expand_x(self, x, h, w):
-        # x: bs q c
-        x = x.permute(0, 2, 1).contiguous()
-        x = x.view(-1, self.width, h, w)
-
-        return x
-        
 
 def Siglip2_Naflex_ViT_Wrapper(model, use_reg=False, clipself_model=False):
     def convert_image_to_patches(image: "torch.Tensor", patch_size: int) -> "torch.Tensor":
@@ -504,11 +382,3 @@ def Siglip2_Naflex_ViT_Wrapper(model, use_reg=False, clipself_model=False):
     else:
         vit.num_register_tokens = 0
     return vit
-
-
-
-if __name__ == "__main__":
-    # EVA02-CLIP-B-16
-    model = Siglip2ViT("SigLIP2-B-16-224", "google/siglip2-base-patch16-224")
-    model(torch.rand(2, 3, 224, 224))
-    print()
