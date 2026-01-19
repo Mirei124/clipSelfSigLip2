@@ -509,13 +509,15 @@ def create_model_and_transforms(
     #     is_train=False,
     # )
     preprocess_val_det = det_image_transform(
-        det_image_size,
+        # TODO: may cause bug
+        # det_image_size,
+        model.visual.image_size[0],
         is_train=False,
         mean=image_mean,
         std=image_std,
     )
     preprocess_val_img = image_transform(
-        model.visual.image_size,
+        model.visual.image_size[0],
         is_train=False,
         mean=image_mean,
         std=image_std,

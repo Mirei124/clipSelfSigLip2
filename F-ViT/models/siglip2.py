@@ -301,8 +301,8 @@ class Siglip2ViT(BaseModule):
                     outs.append(self._expand_x(hidden_states, h, w))
             
             last_hidden_state = visual.encoder.layers[-1](hidden_states=hidden_states, attention_mask=None)[0]
-            if (len(visual.encoder.layers) - 1) in self.vit_layers:
-                outs.append(self._expand_x(last_hidden_state, h, w))
+            # if (len(visual.encoder.layers) - 1) in self.vit_layers:
+            #     outs.append(self._expand_x(last_hidden_state, h, w))
 
             # if self.num_register_tokens > 0:
             #     # apply projection only on non-register tokens
@@ -326,6 +326,9 @@ class Siglip2ViT(BaseModule):
             last_hidden_state = visual.head.layernorm(last_hidden_state)
             last_hidden_state = residual + visual.head.mlp(last_hidden_state)
             
+            if (len(visual.encoder.layers) - 1) in self.vit_layers:
+                outs.append(self._expand_x(last_hidden_state, h, w))
+
             if not self.training:
                 last_hidden_state = F.normalize(last_hidden_state, dim=-1)
                 feature_map = last_hidden_state.view(bs, h, w, -1).permute(0, 3, 1, 2)

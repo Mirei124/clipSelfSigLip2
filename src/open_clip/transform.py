@@ -5,6 +5,7 @@ from dataclasses import dataclass, asdict
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import torch
+import torch.nn as nn
 import torchvision.transforms.functional as F
 from torchvision.transforms import Normalize, Compose, RandomResizedCrop, InterpolationMode, ToTensor, Resize, \
     CenterCrop, ColorJitter, Grayscale
@@ -306,6 +307,7 @@ def image_transform(
         interpolation: Optional[str] = None,
         fill_color: int = 0,
         aug_cfg: Optional[Union[Dict[str, Any], AugmentationCfg]] = None,
+        resize_longest_max=False,
 ):
     mean = mean or OPENAI_DATASET_MEAN
     if not isinstance(mean, (list, tuple)):
@@ -383,7 +385,9 @@ def image_transform(
                 warnings.warn(f'Unused augmentation cfg items, specify `use_timm` to use ({list(aug_cfg_dict.keys())}).')
         return train_transform
     else:
-        if resize_mode == 'longest':
+        if resize_longest_max:
+            transforms = [ResizeMaxSize(image_size, fill=fill_color)]
+        elif resize_mode == 'longest':
             transforms = [
                 ResizeKeepRatio(image_size, interpolation=interpolation_mode, longest=1),
                 CenterCropOrPad(image_size, fill=fill_color)

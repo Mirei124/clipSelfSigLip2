@@ -108,8 +108,6 @@ class TimmModel(nn.Module):
             head_layers['proj'] = nn.Linear(prev_chs, embed_dim, bias=proj_bias)
         elif proj == 'mlp':
             head_layers['mlp'] = Mlp(prev_chs, 2 * embed_dim, embed_dim, drop=(drop, 0), bias=(True, proj_bias))
-        else:
-            assert not proj, f'Unknown projection type {proj}.'
 
         self.head = nn.Sequential(head_layers)
 
@@ -183,10 +181,28 @@ class TimmModel(nn.Module):
         return x
 
     def encode_dense(self, x, **kwargs):
+        # 1, 3, 224, 224
         x = self.trunk.forward_features(x)
-        x = self.dense_trunk_head(x)
-        x = self.head(x)
-        x = x.permute(0, 3, 1, 2)
+        # x = self.dense_trunk_head(x)
+        # x = self.head(x)
+        # x = x.permute(0, 3, 1, 2)
+
+        # bs, l, c (1, 196, 768)
+        bs, w, c = x.shape
+        w = int(w ** 0.5)
+
+        query = self.trunk.attn_pool.q(x)
+        kv = self.trunk.attn_pool.kv(x)
+        key, value = kv.chunk(2, dim=-1)
+
+        x = self.trunk.attn_pool.proj(value)
+
+        residual = x
+        x = self.trunk.attn_pool.norm(x)
+        x = residual + self.trunk.attn_pool.mlp(x)
+
+        x = x.permute(0, 2, 1).reshape(bs, c, w, w)
+        # b, c, l
 
         return x
 
@@ -211,7 +227,7 @@ class TimmModel(nn.Module):
         return features
 
     def extract_roi_features(self, x, normed_boxes, extract_type='v1'):
-        assert extract_type == "v1"
+        # assert extract_type == "v1"
         if extract_type == 'v1':
             return self._extract_roi_features_v1(x, normed_boxes)
         else:
