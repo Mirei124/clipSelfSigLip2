@@ -7,19 +7,22 @@ from collections import OrderedDict
 
 import torch
 import torch.nn as nn
+
 from torchvision.ops import roi_align
 import torch.nn.functional as F
+
 try:
     import timm
-    from timm.models.layers import Mlp, to_2tuple
     try:
-        # old timm imports < 0.8.1
-        from timm.models.layers.attention_pool2d import RotAttentionPool2d
-        from timm.models.layers.attention_pool2d import AttentionPool2d as AbsAttentionPool2d
-    except ImportError:
         # new timm imports >= 0.8.1
         from timm.layers import RotAttentionPool2d
         from timm.layers import AttentionPool2d as AbsAttentionPool2d
+        from timm.layers import Mlp, to_2tuple
+    except ImportError as e:
+        # fallback, try old timm imports < 0.8.1
+        from timm.models.layers.attention_pool2d import RotAttentionPool2d
+        from timm.models.layers.attention_pool2d import AttentionPool2d as AbsAttentionPool2d
+        from timm.models.layers import Mlp, to_2tuple
 except ImportError:
     timm = None
 
@@ -56,11 +59,16 @@ class TimmModel(nn.Module):
             timm_kwargs['patch_drop_rate'] = patch_drop
 
         custom_pool = pool in ('abs_attn', 'rot_attn')
-        if not proj and not custom_pool:
+        if proj:
+            assert proj in ("linear", "mlp", "none")
+        extra_proj = proj in ("linear", "mlp")
+        if not extra_proj and not custom_pool:
             # use network classifier head as projection if no proj specified and no custom pooling used
+            # if projection is explicitly set to "none" will be pass through from network trunk
+            proj_dim = 0 if proj == 'none' else embed_dim
             self.trunk = timm.create_model(
                 model_name,
-                num_classes=embed_dim,
+                num_classes=proj_dim,
                 global_pool=pool,
                 pretrained=pretrained,
                 **timm_kwargs,
