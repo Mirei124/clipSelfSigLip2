@@ -509,9 +509,7 @@ def create_model_and_transforms(
     #     is_train=False,
     # )
     preprocess_val_det = det_image_transform(
-        # TODO: may cause bug
-        # det_image_size,
-        model.visual.image_size[0],
+        det_image_size,
         is_train=False,
         mean=image_mean,
         std=image_std,
@@ -535,14 +533,14 @@ def create_model_and_transforms(
         preprocess_train = [preprocess_val_det, preprocess_val_img] \
             if 'distill' in dataset_type or dataset_type == 'region_clip'\
                or dataset_type in ['clipself', 'clipself_proposals', "coop"] \
-            else image_transform(model.visual.image_size,
+            else image_transform(model.visual.image_size[0],
                                  is_train=True,
                                  mean=image_mean,
                                  std=image_std,
                                  aug_cfg=aug_cfg)
     else:
         preprocess_train = image_transform(
-            model.visual.image_size,
+            model.visual.image_size[0],
             is_train=True,
             mean=image_mean,
             std=image_std,

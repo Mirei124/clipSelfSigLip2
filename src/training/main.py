@@ -343,4 +343,8 @@ def main(args):
 
 
 if __name__ == "__main__":
+    # import debugpy
+    # debugpy.listen(5678)
+    # print("[debugpy] waiting...")
+    # debugpy.wait_for_client()
     main(sys.argv[1:])

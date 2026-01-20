@@ -10,6 +10,8 @@ import torch.nn as nn
 
 from torchvision.ops import roi_align
 import torch.nn.functional as F
+from typing import Optional
+from timm.layers import resample_abs_pos_embed
 
 try:
     import timm
@@ -27,6 +29,59 @@ except ImportError:
     timm = None
 
 from .utils import freeze_batch_norm_2d
+
+
+def new_forward_features(self, x: torch.Tensor, attn_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """Forward pass through feature layers (embeddings, transformer blocks, post-transformer norm)."""
+        # https://github.com/huggingface/pytorch-image-models/blob/836dd99075a13c4b45808d2c917f66162d28a067/timm/models/vision_transformer.py#L1215
+        B, _, H, W = x.shape
+
+        # patch_embed
+        x = self.patch_embed.proj(x)
+        x = x.flatten(2).transpose(1, 2)  # NCHW -> NLC
+        x = self.patch_embed.norm(x)
+
+        # _pos_embed
+        if self.patch_embed.img_size != (H, W):
+            patch_size = self.patch_embed.patch_size
+            pos_embed = resample_abs_pos_embed(
+                self.pos_embed,
+                new_size=(H // patch_size[0], W // patch_size[1]),
+                old_size=self.patch_embed.grid_size,
+                num_prefix_tokens=0 if self.no_embed_class else self.num_prefix_tokens,
+            )
+        else:
+            pos_embed = self.pos_embed
+
+        to_cat = []
+        if self.cls_token is not None:
+            to_cat.append(self.cls_token.expand(x.shape[0], -1, -1))
+        if self.reg_token is not None:
+            to_cat.append(self.reg_token.expand(x.shape[0], -1, -1))
+
+        if self.no_embed_class:
+            # deit-3, updated JAX (big vision)
+            # position embedding does not overlap with class token, add then concat
+            x = x + pos_embed
+            if to_cat:
+                x = torch.cat(to_cat + [x], dim=1)
+        else:
+            # original timm, JAX, and deit vit impl
+            # pos_embed has entry for class token, concat then add
+            if to_cat:
+                x = torch.cat(to_cat + [x], dim=1)
+            x = x + pos_embed
+
+        x = self.pos_drop(x)
+        # end _pos_embed
+
+        x = self.patch_drop(x)
+        x = self.norm_pre(x)
+
+        x = self.blocks(x)
+
+        x = self.norm(x)
+        return x
 
 
 class TimmModel(nn.Module):
@@ -111,6 +166,8 @@ class TimmModel(nn.Module):
 
         self.head = nn.Sequential(head_layers)
 
+        self.trunk.forward_features = new_forward_features.__get__(self.trunk)
+
     def lock(self, unlocked_groups=0, freeze_bn_stats=False):
         """ lock modules
         Args:
@@ -181,29 +238,50 @@ class TimmModel(nn.Module):
         return x
 
     def encode_dense(self, x, **kwargs):
-        # 1, 3, 224, 224
+        # 1, 3, 224, 224 or 1, 3, 1024, 1024
         x = self.trunk.forward_features(x)
-        # x = self.dense_trunk_head(x)
-        # x = self.head(x)
-        # x = x.permute(0, 3, 1, 2)
 
         # bs, l, c (1, 196, 768)
-        bs, w, c = x.shape
-        w = int(w ** 0.5)
+        B, L, C = x.shape
+        W = int(L ** 0.5)
 
-        query = self.trunk.attn_pool.q(x)
-        kv = self.trunk.attn_pool.kv(x)
-        key, value = kv.chunk(2, dim=-1)
+        # proj value
+        # query = self.trunk.attn_pool.q(x)
+        # kv = self.trunk.attn_pool.kv(x)
+        # key, value = kv.chunk(2, dim=-1)
 
-        x = self.trunk.attn_pool.proj(value)
+        # x = self.trunk.attn_pool.proj(value)
 
-        residual = x
-        x = self.trunk.attn_pool.norm(x)
-        x = residual + self.trunk.attn_pool.mlp(x)
+        # residual = x
+        # x = self.trunk.attn_pool.norm(x)
+        # x = residual + self.trunk.attn_pool.mlp(x)
 
-        x = x.permute(0, 2, 1).reshape(bs, c, w, w)
-        # b, c, l
+        # x = x.permute(0, 2, 1).reshape(B, C, w, w)
+        # end proj value
 
+        # qq attn
+        head_dim = self.trunk.attn_pool.head_dim
+        n_head = x.shape[-1] // head_dim
+        q = self.trunk.attn_pool.q(x)
+        k, v = self.trunk.attn_pool.kv(x).chunk(2, dim=-1)
+        q = q.view(B, L, n_head, head_dim).transpose(1, 2)
+        k = k.view(B, L, n_head, head_dim).transpose(1, 2)
+        v = v.view(B, L, n_head, head_dim).transpose(1, 2)
+
+        attn_weight = torch.matmul(q, q.transpose(-1, -2)) * (head_dim**-0.5)
+        attn_weight = attn_weight.softmax(dim=-1)
+        attn_out = torch.matmul(attn_weight, v)
+        attn_out = attn_out.transpose(1, 2).reshape(B, L, -1)
+        x = self.trunk.attn_pool.proj(attn_out)
+
+        # residual = x
+        # x = self.trunk.attn_pool.norm(x)
+        # x = residual + self.trunk.attn_pool.mlp(x)
+
+        x = x.permute(0, 2, 1).reshape(B, C, W, W)
+        # end qq attn
+
+        # b, c, w, w
         return x
 
     def dense_trunk_head(self, x):
